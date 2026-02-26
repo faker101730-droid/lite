@@ -211,30 +211,56 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         yaxis="y2",
         hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>"
     )
+
+    # ここで「凡例・軸ラベルの重なり」を解消
+    # - 凡例はプロット外（下）へ
+    # - 左右の余白を少し増やし、automarginも有効化
+    # - 下余白も増やして、凡例＋x軸ラベルがぶつからないようにする
     fig.update_layout(
         template="plotly_dark",
         title=title,
-        height=430,
-        margin=dict(l=90, r=70, t=50, b=80),
-        legend=dict(orientation="h"),
-        yaxis=dict(title="査定額(円)", tickformat=",.0f", automargin=True),
-        yaxis2=dict(title="査定率(%)", overlaying="y", side="right", tickformat=".2f", automargin=True),
-        xaxis=dict(title="", tickangle=-35, automargin=True),
+        height=470,
+        margin=dict(l=100, r=90, t=60, b=140),
+        legend=dict(
+            orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=-0.28,
+            yanchor="top",
+            font=dict(size=12),
+            traceorder="normal"
+        ),
+        yaxis=dict(
+            title="査定額(円)",
+            tickformat=",.0f",
+            automargin=True,
+            title_standoff=18
+        ),
+        yaxis2=dict(
+            title="査定率(%)",
+            overlaying="y",
+            side="right",
+            tickformat=".2f",
+            automargin=True,
+            title_standoff=18
+        ),
+        xaxis=dict(
+            title="",
+            tickangle=-35,
+            automargin=True,
+            tickfont=dict(size=11)
+        ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
-def build_pie(period_filter: pd.DataFrame, title: str, group_col: str = "査定理由カテゴリ"):
-    s = (
-        period_filter.groupby(group_col, as_index=False)
-        .agg(査定額=("査定額","sum"))
-        .sort_values("査定額", ascending=False)
-    )
+def build_pie(period_filter: pd.DataFrame, title: str):
+    s = period_filter.groupby("査定理由カテゴリ", as_index=False).agg(査定額=("査定額","sum")).sort_values("査定額", ascending=False)
     if s.empty:
         return None
     fig = go.Figure(data=[
-        go.Pie(labels=s[group_col], values=s["査定額"], textinfo="percent+label")
+        go.Pie(labels=s["査定理由カテゴリ"], values=s["査定額"], textinfo="percent+label")
     ])
     fig.update_layout(
         template="plotly_dark",
@@ -465,20 +491,11 @@ def main():
                             st.dataframe(top_dept, use_container_width=True, hide_index=True)
 
         with t2:
-            c_pie1, c_pie2 = st.columns(2)
-            with c_pie1:
-                pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）", group_col="査定理由カテゴリ")
-                if pie is not None:
-                    st.plotly_chart(pie, use_container_width=True)
-                else:
-                    st.info("内訳（理由カテゴリ）表示用のデータがありません。")
-
-            with c_pie2:
-                pie_dept = build_pie(period_ddf, title="査定内訳（診療科）", group_col="診療科")
-                if pie_dept is not None:
-                    st.plotly_chart(pie_dept, use_container_width=True)
-                else:
-                    st.info("内訳（診療科）表示用のデータがありません。")
+            pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）")
+            if pie is not None:
+                st.plotly_chart(pie, use_container_width=True)
+            else:
+                st.info("内訳表示用のデータがありません。")
 
             breakdown_tables(period_ddf, s)
 

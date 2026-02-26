@@ -3,3 +3,4 @@ pandas==2.2.2
 numpy==2.0.1
 openpyxl==3.1.5
 plotly==5.22.0
+streamlit-plotly-events==0.0.6

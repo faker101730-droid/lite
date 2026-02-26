@@ -1,6 +1,4 @@
-import io
-import os
-from dataclasses import dataclass
+es import dataclass
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -8,7 +6,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from streamlit_plotly_events import plotly_events
 
-APP_TITLE = "DPC査定分析 v3.3（入院計算会議パック）"
+APP_TITLE = "DPC査定分析 v3.4"
 REQUIRED_COLS = ["月","区分","入院種別","診療科","査定理由カテゴリ","注意項目","査定額","件数","請求額"]
 
 LOCAL_STORE_DIR = "data_store"
@@ -44,6 +42,21 @@ def parse_month(x) -> pd.Period:
             return pd.Period(pd.to_datetime(x).strftime("%Y-%m"), freq="M")
         except Exception:
             return pd.NaT
+
+def save_local_excel(file_bytes: bytes):
+    os.makedirs(LOCAL_STORE_DIR, exist_ok=True)
+    with open(LOCAL_STORE_FILE, "wb") as f:
+        f.write(file_bytes)
+
+def load_local_excel() -> bytes | None:
+    if os.path.exists(LOCAL_STORE_FILE):
+        with open(LOCAL_STORE_FILE, "rb") as f:
+            return f.read()
+    return None
+
+def clear_local_excel():
+    if os.path.exists(LOCAL_STORE_FILE):
+        os.remove(LOCAL_STORE_FILE)
 
 def load_excel(file_bytes: bytes) -> tuple[pd.DataFrame, Settings]:
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -81,17 +94,6 @@ def load_excel(file_bytes: bytes) -> tuple[pd.DataFrame, Settings]:
             s.w_rate = int(float(d.get("w_rate", s.w_rate)))
             s.breakdown_topn = int(float(d.get("breakdown_topn", s.breakdown_topn)))
     return df, s
-
-def save_local_excel(file_bytes: bytes):
-    os.makedirs(LOCAL_STORE_DIR, exist_ok=True)
-    with open(LOCAL_STORE_FILE, "wb") as f:
-        f.write(file_bytes)
-
-def load_local_excel() -> bytes | None:
-    if os.path.exists(LOCAL_STORE_FILE):
-        with open(LOCAL_STORE_FILE, "rb") as f:
-            return f.read()
-    return None
 
 def compute_monthly(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby(["月","区分","入院種別","診療科"], as_index=False).agg(
@@ -208,15 +210,15 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>"
     )
     fig.update_layout(
-        template="plotly_dark",  # ②白黒/白背景対策
+        template="plotly_dark",
         title=title,
         height=430,
-        margin=dict(l=90, r=70, t=50, b=80),  # ①② 数字途切れ対策（左余白増）
+        margin=dict(l=90, r=70, t=50, b=80),
         legend=dict(orientation="h"),
         yaxis=dict(title="査定額(円)", tickformat=",.0f", automargin=True),
         yaxis2=dict(title="査定率(%)", overlaying="y", side="right", tickformat=".2f", automargin=True),
         xaxis=dict(title="", tickangle=-35, automargin=True),
-        paper_bgcolor="rgba(0,0,0,0)",  # Streamlitテーマに馴染ませる
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
@@ -262,6 +264,12 @@ def breakdown_tables(period_filter: pd.DataFrame, s: Settings):
     st.markdown(f"**内訳（診療科 Top {s.breakdown_topn}）**")
     st.dataframe(by_dept, use_container_width=True, hide_index=True)
 
+def apply_bytes(raw: bytes):
+    df, s0 = load_excel(raw)
+    st.session_state["raw_bytes"] = raw
+    st.session_state["df"] = df
+    st.session_state["settings"] = s0
+
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
@@ -273,25 +281,54 @@ def main():
 
     with st.sidebar:
         st.subheader("データ")
-        up = st.file_uploader("Excelをアップロード（dataシート）", type=["xlsx"])
+        up = st.file_uploader("Excelを選択（まだ反映しません）", type=["xlsx"])
         if up is not None:
-            raw = up.read()
-            st.session_state["raw_bytes"] = raw
-            save_local_excel(raw)
-            st.success("データを保存しました（ローカル自動反映）")
+            st.session_state["pending_bytes"] = up.read()
+            st.success("ファイルを読み込みました（未反映）")
 
-        if st.session_state["raw_bytes"] is not None and st.session_state["df"] is None:
-            try:
-                df, s0 = load_excel(st.session_state["raw_bytes"])
-                st.session_state["df"] = df
-                st.session_state["settings"] = s0
-            except Exception as e:
-                st.error(str(e))
+        colA, colB = st.columns(2)
+        with colA:
+            if st.button("📌 保存して反映", use_container_width=True):
+                raw = st.session_state.get("pending_bytes")
+                if raw is None:
+                    st.error("先にExcelを選択してね。")
+                else:
+                    try:
+                        apply_bytes(raw)
+                        save_local_excel(raw)
+                        st.success("保存＆反映しました。")
+                    except Exception as e:
+                        st.error(str(e))
+
+        with colB:
+            if st.button("🔁 保存データを反映", use_container_width=True):
+                raw = load_local_excel()
+                if raw is None:
+                    st.warning("保存データがありません。")
+                else:
+                    try:
+                        apply_bytes(raw)
+                        st.success("保存データを反映しました。")
+                    except Exception as e:
+                        st.error(str(e))
+
+        if st.button("🧹 保存データを削除", use_container_width=True):
+            clear_local_excel()
+            st.session_state["raw_bytes"] = None
+            st.session_state["df"] = None
+            st.success("保存データを削除しました。")
 
         df = st.session_state.get("df")
         if df is None:
-            st.info("左のアップロードからデータを入れてね（デモ用Excelも同梱）。")
-            st.stop()
+            if st.session_state.get("raw_bytes") is not None:
+                try:
+                    apply_bytes(st.session_state["raw_bytes"])
+                    df = st.session_state.get("df")
+                except Exception as e:
+                    st.error(str(e))
+            if df is None:
+                st.info("①Excelを選択 → ②『保存して反映』を押してね。")
+                st.stop()
 
         st.divider()
         dept_mode = st.radio("粒度", ["全体","診療科別"], horizontal=True)
@@ -303,8 +340,8 @@ def main():
         with st.expander("⚙ 判定設定（折りたたみ）", expanded=False):
             s = st.session_state["settings"]
             s.sensitivity = st.select_slider("感度", options=["low","standard","high"], value=s.sensitivity)
-            s.top_n_amount = int(st.slider("会議：金額上位N", 5, 50, int(s.top_n_amount), step=5))
-            s.top_n_increase = int(st.slider("会議：増加上位N（最新月のみ）", 5, 50, int(s.top_n_increase), step=5))
+            s.top_n_amount = int(st.slider("金額上位N（アラート判定）", 5, 50, int(s.top_n_amount), step=5))
+            s.top_n_increase = int(st.slider("増加上位N（最新月のみ）", 5, 50, int(s.top_n_increase), step=5))
             c1,c2 = st.columns(2)
             with c1:
                 s.min_amount = int(st.number_input(
@@ -356,7 +393,6 @@ def main():
             period_label = f"累計：{fmt_month(fy_start)}〜{fmt_month(latest)}"
             period_ddf = ddf[(ddf["月"]>=fy_start) & (ddf["月"]<=latest)]
 
-        # totals
         cur_msc = msc2[msc2["月"]==latest] if period_mode=="最新月" else msc2[(msc2["月"]>=fiscal_range(latest)[0]) & (msc2["月"]<=latest)]
         tot_satei = float(cur_msc["査定額"].sum())
         tot_claim = float(cur_msc["請求額"].sum())
@@ -423,7 +459,6 @@ def main():
                             st.dataframe(top_dept, use_container_width=True, hide_index=True)
 
         with t2:
-            # ③円グラフ復活（＋詳細も残す）
             pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）")
             if pie is not None:
                 st.plotly_chart(pie, use_container_width=True)
@@ -453,13 +488,11 @@ def main():
         render_standard("外来")
 
     with tab_in:
-        sub_dpc, sub_fee, sub_meet = st.tabs(["DPC","出来高","入院計算会議"])
+        sub_dpc, sub_fee = st.tabs(["DPC","出来高"])
         with sub_dpc:
             render_standard("入院DPC")
         with sub_fee:
             render_standard("入院出来高")
-        with sub_meet:
-            st.info("会議ページは安定優先で据え置き（次の改修で同じUI/クリック詳細に合わせるのが吉）。")
 
 if __name__ == "__main__":
     main()

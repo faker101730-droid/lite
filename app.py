@@ -255,12 +255,16 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
     )
     return fig
 
-def build_pie(period_filter: pd.DataFrame, title: str):
-    s = period_filter.groupby("査定理由カテゴリ", as_index=False).agg(査定額=("査定額","sum")).sort_values("査定額", ascending=False)
+def build_pie(period_filter: pd.DataFrame, title: str, group_col: str = "査定理由カテゴリ"):
+    s = (
+        period_filter.groupby(group_col, as_index=False)
+        .agg(査定額=("査定額","sum"))
+        .sort_values("査定額", ascending=False)
+    )
     if s.empty:
         return None
     fig = go.Figure(data=[
-        go.Pie(labels=s["査定理由カテゴリ"], values=s["査定額"], textinfo="percent+label")
+        go.Pie(labels=s[group_col], values=s["査定額"], textinfo="percent+label")
     ])
     fig.update_layout(
         template="plotly_dark",
@@ -491,11 +495,20 @@ def main():
                             st.dataframe(top_dept, use_container_width=True, hide_index=True)
 
         with t2:
-            pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）")
-            if pie is not None:
-                st.plotly_chart(pie, use_container_width=True)
-            else:
-                st.info("内訳表示用のデータがありません。")
+            c_pie1, c_pie2 = st.columns(2)
+            with c_pie1:
+                pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）", group_col="査定理由カテゴリ")
+                if pie is not None:
+                    st.plotly_chart(pie, use_container_width=True)
+                else:
+                    st.info("内訳（理由カテゴリ）表示用のデータがありません。")
+
+            with c_pie2:
+                pie_dept = build_pie(period_ddf, title="査定内訳（診療科）", group_col="診療科")
+                if pie_dept is not None:
+                    st.plotly_chart(pie_dept, use_container_width=True)
+                else:
+                    st.info("内訳（診療科）表示用のデータがありません。")
 
             breakdown_tables(period_ddf, s)
 

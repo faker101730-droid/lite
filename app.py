@@ -283,7 +283,7 @@ def main():
             s.top_n_increase = int(st.slider("会議：増加上位N（最新月のみ）", 5, 50, int(s.top_n_increase), step=5))
             c1,c2 = st.columns(2)
             with c1:
-s.min_amount = int(st.number_input(
+                s.min_amount = int(st.number_input(
                     "除外：査定額（円）未満",
                     min_value=0,
                     max_value=10_000_000_000,
@@ -291,7 +291,7 @@ s.min_amount = int(st.number_input(
                     step=50_000
                 ))
             with c2:
-s.min_count = int(st.number_input(
+                s.min_count = int(st.number_input(
                     "除外：件数 未満",
                     min_value=0,
                     max_value=1_000_000,

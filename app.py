@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from streamlit_plotly_events import plotly_events
 
-APP_TITLE = "DPC査定分析 v3.2（入院計算会議パック）"
+APP_TITLE = "DPC査定分析 v3.3（入院計算会議パック）"
 REQUIRED_COLS = ["月","区分","入院種別","診療科","査定理由カテゴリ","注意項目","査定額","件数","請求額"]
 
 LOCAL_STORE_DIR = "data_store"
@@ -162,7 +162,6 @@ def score_alerts(ddf: pd.DataFrame, msc: pd.DataFrame, period_mode: str, s: Sett
     else:
         cur["増加額"] = 0.0
 
-    # points
     r_amt = cur["査定額"].rank(method="min", ascending=False)
     cur["p_amount"] = np.where(r_amt <= s.top_n_amount, 2, np.where(r_amt <= s.top_n_amount*2, 1, 0))
 
@@ -199,29 +198,60 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
     y_rate = (chart_df["査定率"]*100).tolist()
 
     fig = go.Figure()
-    fig.add_bar(x=x, y=y_amt, name="査定額", hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>")
-    fig.add_scatter(x=x, y=y_rate, mode="lines+markers", name="査定率(%)",
-                    yaxis="y2",
-                    hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>")
+    fig.add_bar(
+        x=x, y=y_amt, name="査定額",
+        hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>"
+    )
+    fig.add_scatter(
+        x=x, y=y_rate, mode="lines+markers", name="査定率(%)",
+        yaxis="y2",
+        hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>"
+    )
     fig.update_layout(
+        template="plotly_dark",  # ②白黒/白背景対策
         title=title,
-        height=420,
-        margin=dict(l=50, r=50, t=40, b=60),
+        height=430,
+        margin=dict(l=90, r=70, t=50, b=80),  # ①② 数字途切れ対策（左余白増）
         legend=dict(orientation="h"),
-        yaxis=dict(title="査定額(円)", tickformat=",.0f"),
-        yaxis2=dict(title="査定率(%)", overlaying="y", side="right", tickformat=".2f"),
-        xaxis=dict(title="", tickangle=-30),
+        yaxis=dict(title="査定額(円)", tickformat=",.0f", automargin=True),
+        yaxis2=dict(title="査定率(%)", overlaying="y", side="right", tickformat=".2f", automargin=True),
+        xaxis=dict(title="", tickangle=-35, automargin=True),
+        paper_bgcolor="rgba(0,0,0,0)",  # Streamlitテーマに馴染ませる
+        plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
-def breakdown_tables(ddf: pd.DataFrame, period_filter: pd.DataFrame, s: Settings):
-    # ⑤：内訳をもう少し具体的に
-    # A) 理由カテゴリ
+def build_pie(period_filter: pd.DataFrame, title: str):
+    s = period_filter.groupby("査定理由カテゴリ", as_index=False).agg(査定額=("査定額","sum")).sort_values("査定額", ascending=False)
+    if s.empty:
+        return None
+    fig = go.Figure(data=[
+        go.Pie(labels=s["査定理由カテゴリ"], values=s["査定額"], textinfo="percent+label")
+    ])
+    fig.update_layout(
+        template="plotly_dark",
+        title=title,
+        height=360,
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+def breakdown_tables(period_filter: pd.DataFrame, s: Settings):
     by_reason = period_filter.groupby("査定理由カテゴリ", as_index=False).agg(査定額=("査定額","sum"), 件数=("件数","sum")).sort_values("査定額", ascending=False)
-    # B) 注意項目TopN（カテゴリ横断）
-    by_item = period_filter.groupby(["査定理由カテゴリ","注意項目"], as_index=False).agg(査定額=("査定額","sum"), 件数=("件数","sum")).sort_values("査定額", ascending=False).head(s.breakdown_topn)
-    # C) 診療科TopN
-    by_dept = period_filter.groupby("診療科", as_index=False).agg(査定額=("査定額","sum"), 件数=("件数","sum")).sort_values("査定額", ascending=False).head(s.breakdown_topn)
+    by_item = (
+        period_filter.groupby(["査定理由カテゴリ","注意項目"], as_index=False)
+        .agg(査定額=("査定額","sum"), 件数=("件数","sum"))
+        .sort_values("査定額", ascending=False)
+        .head(s.breakdown_topn)
+    )
+    by_dept = (
+        period_filter.groupby("診療科", as_index=False)
+        .agg(査定額=("査定額","sum"), 件数=("件数","sum"))
+        .sort_values("査定額", ascending=False)
+        .head(s.breakdown_topn)
+    )
 
     st.markdown("**内訳（理由カテゴリ）**")
     st.dataframe(by_reason, use_container_width=True, hide_index=True)
@@ -318,19 +348,16 @@ def main():
         msc2 = monthly_scope(msc, dept_mode)
         latest = msc2["月"].sort_values().unique()[-1]
 
-        # period filter for summary cards + breakdown
         if period_mode=="最新月":
-            cur_month = latest
-            cur_msc = msc2[msc2["月"]==latest]
             period_label = f"最新月：{fmt_month(latest)}"
             period_ddf = ddf[ddf["月"]==latest]
         else:
             fy_start, _ = fiscal_range(latest)
-            cur_month = latest
-            cur_msc = msc2[(msc2["月"]>=fy_start) & (msc2["月"]<=latest)]
             period_label = f"累計：{fmt_month(fy_start)}〜{fmt_month(latest)}"
             period_ddf = ddf[(ddf["月"]>=fy_start) & (ddf["月"]<=latest)]
 
+        # totals
+        cur_msc = msc2[msc2["月"]==latest] if period_mode=="最新月" else msc2[(msc2["月"]>=fiscal_range(latest)[0]) & (msc2["月"]<=latest)]
         tot_satei = float(cur_msc["査定額"].sum())
         tot_claim = float(cur_msc["請求額"].sum())
         tot_rate = (tot_satei/tot_claim) if tot_claim>0 else 0.0
@@ -347,10 +374,9 @@ def main():
                   f"{(alert_tbl['レベル']=='🟠要注意').sum() if not alert_tbl.empty else 0}/"
                   f"{(alert_tbl['レベル']=='🟡観察').sum() if not alert_tbl.empty else 0}")
 
-        t1,t2,t3 = st.tabs(["① 推移（混合）","② 内訳（詳細）","③ 注意項目（アラート）"])
+        t1,t2,t3 = st.tabs(["① 推移（混合）","② 内訳（円＋詳細）","③ 注意項目（アラート）"])
 
         with t1:
-            # ①年月表記改善 / ②数値途切れ対策（tickformat） / ③一覧 / ④クリックで詳細
             chart_df = msc2.sort_values("月").copy()
             fig = build_mix_fig(chart_df, title="査定額（棒）× 査定率（折れ線）")
             clicked = plotly_events(
@@ -358,12 +384,11 @@ def main():
                 click_event=True,
                 hover_event=False,
                 select_event=False,
-                override_height=420,
+                override_height=430,
                 key=f"mix_{segment_label}_{dept_mode}_{dept}_{period_mode}"
             )
-            st.caption("※棒グラフをクリックすると、その月の詳細（注意項目Topなど）が下に出ます。")
+            st.caption("※棒グラフをクリックすると、その月の詳細（注意項目/診療科Top）が下に出ます。")
 
-            # ③：グラフ下にデータ一覧
             show_tbl = chart_df.copy()
             show_tbl["年月"] = show_tbl["月"].apply(fmt_month)
             show_tbl = show_tbl.drop(columns=["月"])
@@ -372,15 +397,12 @@ def main():
             show_tbl["査定額"] = show_tbl["査定額"].round(0).astype(int)
             show_tbl["請求額"] = show_tbl["請求額"].round(0).astype(int)
             show_tbl["件数"] = show_tbl["件数"].round(0).astype(int)
-
             st.markdown("**推移データ（一覧）**")
             st.dataframe(show_tbl, use_container_width=True, hide_index=True)
 
-            # ④クリック詳細
             if clicked:
                 x = clicked[0].get("x")
                 if x:
-                    # x is "YYYY/MM"
                     month_map = {fmt_month(p): p for p in chart_df["月"].tolist()}
                     sel_p = month_map.get(str(x))
                     if sel_p is not None:
@@ -389,19 +411,26 @@ def main():
                         if ddm.empty:
                             st.info("この月の詳細データがありません。")
                         else:
-                            # top items
                             top_items = ddm.groupby(["査定理由カテゴリ","注意項目"], as_index=False).agg(
                                 査定額=("査定額","sum"), 件数=("件数","sum")
                             ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
                             st.markdown(f"注意項目 Top {s.breakdown_topn}")
                             st.dataframe(top_items, use_container_width=True, hide_index=True)
-                            top_dept = ddm.groupby("診療科", as_index=False).agg(査定額=("査定額","sum"), 件数=("件数","sum")).sort_values("査定額", ascending=False).head(s.breakdown_topn)
+                            top_dept = ddm.groupby("診療科", as_index=False).agg(
+                                査定額=("査定額","sum"), 件数=("件数","sum")
+                            ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
                             st.markdown(f"診療科 Top {s.breakdown_topn}")
                             st.dataframe(top_dept, use_container_width=True, hide_index=True)
 
         with t2:
-            # ⑤：内訳を詳細化（理由カテゴリ＋注意項目TopN＋診療科TopN）
-            breakdown_tables(ddf, period_ddf, s)
+            # ③円グラフ復活（＋詳細も残す）
+            pie = build_pie(period_ddf, title="査定内訳（理由カテゴリ）")
+            if pie is not None:
+                st.plotly_chart(pie, use_container_width=True)
+            else:
+                st.info("内訳表示用のデータがありません。")
+
+            breakdown_tables(period_ddf, s)
 
         with t3:
             if alert_tbl.empty:
@@ -430,7 +459,7 @@ def main():
         with sub_fee:
             render_standard("入院出来高")
         with sub_meet:
-            st.info("v3.2では、会議ページはv3系のまま（安定優先）。必要なら会議ページも同じUI/クリック詳細に合わせて改修するよ。")
+            st.info("会議ページは安定優先で据え置き（次の改修で同じUI/クリック詳細に合わせるのが吉）。")
 
 if __name__ == "__main__":
     main()

@@ -196,67 +196,80 @@ def monthly_scope(msc: pd.DataFrame, dept_mode: str):
     g["査定率"] = np.where(g["請求額"]>0, g["査定額"]/g["請求額"], 0.0)
     return g.sort_values("月")
 
-def _nice_pad(vmin: float, vmax: float, pad_ratio: float = 0.06):
-    if not np.isfinite(vmin) or not np.isfinite(vmax):
-        return 0.0, 1.0
-    if vmin == vmax:
-        span = abs(vmin) if vmin != 0 else 1.0
-        return vmin - span*0.5, vmax + span*0.5
-    span = vmax - vmin
-    return vmin - span*pad_ratio, vmax + span*pad_ratio
-
-def _aligned_dual_axis_ranges(y_left: np.ndarray, y_right: np.ndarray):
-    """
-    Align zero across y-axis (left) and y2-axis (right) by setting explicit ranges.
-    Works for positive-only, negative-only, and mixed series.
-    """
-    y_left = np.asarray(y_left, dtype=float)
-    y_right = np.asarray(y_right, dtype=float)
-
-    lmin = np.nanmin(np.append(y_left, 0.0))
-    lmax = np.nanmax(np.append(y_left, 0.0))
-    lmin, lmax = _nice_pad(lmin, lmax)
-
-    # position of 0 on left axis (0..1)
-    denom = (lmax - lmin) if (lmax - lmin) != 0 else 1.0
-    p = (0.0 - lmin) / denom
-    p = float(np.clip(p, 0.0, 1.0))
-
-    rdat_min = np.nanmin(np.append(y_right, 0.0))
-    rdat_max = np.nanmax(np.append(y_right, 0.0))
-
-    # build right range so that zero position matches p and all data fits
-    if p <= 1e-9:
-        rmin = 0.0
-        rmax = rdat_max if rdat_max != 0 else 1.0
-        rmin, rmax = _nice_pad(rmin, rmax)
-        rmin = 0.0  # keep exact zero baseline for positive-only
-    elif (1.0 - p) <= 1e-9:
-        rmax = 0.0
-        rmin = rdat_min if rdat_min != 0 else -1.0
-        rmin, rmax = _nice_pad(rmin, rmax)
-        rmax = 0.0
-    else:
-        need_span_pos = (rdat_max / (1.0 - p)) if rdat_max > 0 else 0.0
-        need_span_neg = (-rdat_min / p) if rdat_min < 0 else 0.0
-        span = max(need_span_pos, need_span_neg, 1e-6)
-        # add padding
-        span *= 1.06
-        rmin = -p * span
-        rmax = (1.0 - p) * span
-        # ensure includes exact data with a tiny epsilon
-        eps = (rmax - rmin) * 0.001
-        rmin = min(rmin, rdat_min - eps)
-        rmax = max(rmax, rdat_max + eps)
-
-    return (lmin, lmax), (rmin, rmax)
-
 def build_mix_fig(chart_df: pd.DataFrame, title: str):
+    """査定額（棒）×査定率（折れ線）の混合グラフ。
+    - 左右二軸の「0」の高さを一致させる（棒と折れ線の0ズレ対策）
+    - 軸レンジを明示して自動ズームを抑制（zoom連打での不安定化対策）
+    """
     x = [fmt_month(p) for p in chart_df["月"]]
-    y_amt = chart_df["査定額"].astype(float).to_numpy()
-    y_rate = (chart_df["査定率"].astype(float) * 100.0).to_numpy()
+    y_amt = pd.to_numeric(chart_df["査定額"], errors="coerce").fillna(0).astype(float).tolist()
+    y_rate = (pd.to_numeric(chart_df["査定率"], errors="coerce").fillna(0).astype(float) * 100).tolist()
 
-    (lmin, lmax), (rmin, rmax) = _aligned_dual_axis_ranges(y_amt, y_rate)
+    def _range_with_zero(vals: list[float], pad: float = 0.10) -> tuple[float, float]:
+        if not vals:
+            return (-1.0, 1.0)
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            return (-1.0, 1.0)
+        if vmin == vmax:
+            if vmin == 0:
+                return (-1.0, 1.0)
+            # 少し幅を持たせる
+            span = abs(vmin) * (1.0 + pad)
+            return (min(0.0, vmin - span * 0.10), max(0.0, vmax + span * 0.10))
+
+        # 0を含むレンジへ
+        if vmin >= 0:
+            lo = 0.0
+            hi = vmax * (1.0 + pad)
+            if hi == 0:
+                hi = 1.0
+            return (lo, hi)
+        if vmax <= 0:
+            hi = 0.0
+            lo = vmin * (1.0 + pad)  # より負側へ
+            if lo == 0:
+                lo = -1.0
+            return (lo, hi)
+
+        # 正負混在
+        lo = vmin * (1.0 + pad)
+        hi = vmax * (1.0 + pad)
+        # 念のため0を包含
+        lo = min(lo, 0.0)
+        hi = max(hi, 0.0)
+        return (lo, hi)
+
+    amt_lo, amt_hi = _range_with_zero(y_amt, pad=0.08)
+
+    # 左軸レンジ内での0位置（下=0, 上=1）
+    denom = (amt_hi - amt_lo) if (amt_hi - amt_lo) != 0 else 1.0
+    f = (0.0 - amt_lo) / denom
+    # 極端値は抑える（無限大レンジ防止）
+    f = float(np.clip(f, 0.02, 0.98))
+
+    # 右軸（率）の上限はデータ最大＋余白
+    rate_max = float(np.nanmax(y_rate)) if len(y_rate) else 0.0
+    rate_min = float(np.nanmin(y_rate)) if len(y_rate) else 0.0
+    if not np.isfinite(rate_max):
+        rate_max = 0.0
+    if not np.isfinite(rate_min):
+        rate_min = 0.0
+
+    rate_hi = max(1.0, rate_max * 1.10)  # 0だけのときも最低レンジ確保
+
+    # 0位置をfに合わせて右軸下限を決める（0ズレ修正のコア）
+    # (0 - lo2)/(hi2 - lo2) = f  => lo2 = -(f/(1-f))*hi2
+    rate_lo = - (f / (1.0 - f)) * rate_hi
+
+    # データの最小が0より大きい場合でも、表示に支障ないように少し余裕
+    rate_lo = min(rate_lo, rate_min - abs(rate_hi) * 0.02)
+
+    # 余白（左軸ラベルの桁数で自動調整）
+    max_abs_amt = max(abs(amt_lo), abs(amt_hi), 1.0)
+    digits = len(f"{int(max_abs_amt):,}")
+    left_margin = 90 + max(0, digits - 6) * 7  # 桁が増えるほど少しだけ左余白を増やす
 
     fig = go.Figure()
     fig.add_bar(
@@ -273,7 +286,7 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         template="plotly_dark",
         title=title,
         height=470,
-        margin=dict(l=110, r=100, t=60, b=140),
+        margin=dict(l=left_margin, r=90, t=60, b=140),
         legend=dict(
             orientation="h",
             x=0.5,
@@ -286,25 +299,29 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         yaxis=dict(
             title="査定額(円)",
             tickformat=",.0f",
-            range=[lmin, lmax],
-            zeroline=True,
+            range=[amt_lo, amt_hi],
             automargin=True,
-            title_standoff=18
+            title_standoff=18,
+            fixedrange=True,  # ズーム/パン無効（plotly_eventsの不安定化対策）
+            zeroline=True
         ),
         yaxis2=dict(
             title="査定率(%)",
             overlaying="y",
             side="right",
-            range=[rmin, rmax],
-            zeroline=True,
+            tickformat=".2f",
+            range=[rate_lo, rate_hi],
             automargin=True,
-            title_standoff=18
+            title_standoff=18,
+            fixedrange=True,
+            zeroline=False
         ),
         xaxis=dict(
             title="",
             tickangle=-35,
             automargin=True,
-            tickfont=dict(size=11)
+            tickfont=dict(size=11),
+            fixedrange=True
         ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -509,12 +526,6 @@ def main():
             fig = build_mix_fig(chart_df, title="査定額（棒）× 査定率（折れ線）")
             clicked = plotly_events(
                 fig,
-                config={
-                    'displayModeBar': True,
-                    'modeBarButtonsToRemove': ['zoom2d','pan2d','select2d','lasso2d','zoomIn2d','zoomOut2d','autoScale2d','resetScale2d'],
-                    'scrollZoom': False,
-                    'doubleClick': False,
-                },
                 click_event=True,
                 hover_event=False,
                 select_event=False,

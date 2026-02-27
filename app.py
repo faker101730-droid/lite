@@ -6,7 +6,10 @@ import pandas as pd
 import streamlit as st
 
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
+try:
+    from streamlit_plotly_events import plotly_events  # optional (legacy)
+except Exception:  # pragma: no cover
+    plotly_events = None
 
 APP_TITLE = "DPC査定分析 v3.4"
 REQUIRED_COLS = ["月","区分","入院種別","診療科","査定理由カテゴリ","注意項目","査定額","件数","請求額"]
@@ -197,71 +200,63 @@ def monthly_scope(msc: pd.DataFrame, dept_mode: str):
     return g.sort_values("月")
 
 def build_mix_fig(chart_df: pd.DataFrame, title: str):
-    """査定額（棒）× 査定率（折れ線）の混合グラフ。
-    - 左右二軸の「0の高さ」を一致させる（入院でマイナスが出てもズレない）
-    - ラベル見切れを減らす（桁数に応じて余白を調整）
+    """査定額（棒）×査定率（折れ線）の複合グラフ。
+    - 左右二軸の「0の高さ」を一致させる（入院DPC/出来高でマイナスが出てもズレない）
+    - 軸ラベルが切れにくいように余白を調整
     """
     x = [fmt_month(p) for p in chart_df["月"]]
     y_amt = chart_df["査定額"].astype(float).tolist()
     y_rate = (chart_df["査定率"].astype(float) * 100).tolist()
 
-    def _pad_range(vmin: float, vmax: float, pad_ratio: float = 0.06):
+    def _pad(vmin: float, vmax: float, ratio: float = 0.08):
+        # same value対策
         if vmin == vmax:
-            pad = 1.0 if vmin == 0 else abs(vmin) * 0.1
-            return vmin - pad, vmax + pad
+            if vmin == 0:
+                return -1.0, 1.0
+            d = abs(vmin) * 0.2
+            return vmin - d, vmax + d
         span = vmax - vmin
-        pad = span * pad_ratio
-        return vmin - pad, vmax + pad
+        return vmin - span * ratio, vmax + span * ratio
 
-    def _ensure_zero(vmin: float, vmax: float):
-        # 0を必ず含むようにする
-        if vmin > 0:
-            vmin = 0.0
-        if vmax < 0:
-            vmax = 0.0
-        return vmin, vmax
+    # --- 左軸（円）：必ず0を含めてレンジを固定 ---
+    amt_min = min(y_amt + [0.0])
+    amt_max = max(y_amt + [0.0])
+    amt_min, amt_max = _pad(amt_min, amt_max)
 
-    # primary axis range (amount)
-    a_min = float(min(y_amt)) if len(y_amt) else 0.0
-    a_max = float(max(y_amt)) if len(y_amt) else 0.0
-    a_min, a_max = _pad_range(a_min, a_max)
-    a_min, a_max = _ensure_zero(a_min, a_max)
-
-    # where is zero in primary axis? (0..1)
-    denom = (a_max - a_min)
-    p = 0.5 if denom == 0 else (0.0 - a_min) / denom
-    p = max(0.0, min(1.0, float(p)))
-
-    # secondary data bounds (rate)
-    r_min_data = float(min(y_rate)) if len(y_rate) else 0.0
-    r_max_data = float(max(y_rate)) if len(y_rate) else 0.0
-    r_min_data, r_max_data = _pad_range(r_min_data, r_max_data)
-    r_min_data, r_max_data = _ensure_zero(r_min_data, r_max_data)
-
-    # align secondary axis zero position to primary axis
-    if p <= 0.0001:
-        # 0 at bottom
-        r_min, r_max = 0.0, max(r_max_data, 1.0)
-    elif p >= 0.9999:
-        # 0 at top
-        r_min, r_max = min(r_min_data, -1.0), 0.0
+    # 0位置の割合（下=0.0, 上=1.0）
+    if amt_max == amt_min:
+        f = 0.0
     else:
-        ratio = (1.0 - p) / p  # positive_span / negative_span
-        neg_need = max(0.0, -r_min_data)
-        pos_need = max(0.0, r_max_data)
-        # choose negative span big enough to satisfy both sides with the ratio
-        neg_span = max(neg_need, (pos_need / ratio) if ratio > 0 else neg_need)
-        pos_span = neg_span * ratio
-        # if data requires larger positive span, expand both proportionally
-        if pos_span < pos_need:
-            pos_span = pos_need
-            neg_span = pos_span / ratio
-        r_min, r_max = -neg_span, pos_span
+        f = (0.0 - amt_min) / (amt_max - amt_min)
+        f = max(0.0, min(1.0, f))
 
-    # margin tuning: big numbers need more left margin
-    max_abs_amt = max([abs(v) for v in y_amt] + [0.0])
-    digits = len(f"{int(max_abs_amt):d}") if max_abs_amt >= 1 else 1
-    left_margin = 80 + max(0, digits - 7) * 10  # 7桁くらいまでは80、以降少しずつ増やす
+    # --- 右軸（％）：左軸と同じ0位置になるようにレンジを作る ---
+    rate_min_d = min(y_rate + [0.0])
+    rate_max_d = max(y_rate + [0.0])
+
+    if f <= 0.000001:
+        # 0が下端（全て正側）
+        rmin = 0.0
+        rmax = _pad(0.0, rate_max_d)[1]
+    elif f >= 0.999999:
+        # 0が上端（全て負側）
+        rmax = 0.0
+        rmin = _pad(rate_min_d, 0.0)[0]
+    else:
+        # 0が途中：min=-f*s, max=(1-f)*s の形でデータを内包する最小sを求める
+        req1 = rate_max_d / (1.0 - f) if (1.0 - f) > 0 else 0.0
+        req2 = (-rate_min_d) / f if f > 0 else 0.0
+        s = max(req1, req2, 1e-6)
+        rmin = -f * s
+        rmax = (1.0 - f) * s
+        rmin, rmax = _pad(rmin, rmax)
+
+    # 左余白（桁に応じて）
+    try:
+        digits = len(f"{int(max(abs(amt_min), abs(amt_max))):,}")
+    except Exception:
+        digits = 10
+    left_margin = min(160, max(90, 60 + digits * 6))
 
     fig = go.Figure()
     fig.add_bar(
@@ -278,7 +273,7 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         template="plotly_dark",
         title=title,
         height=470,
-        margin=dict(l=left_margin, r=90, t=60, b=140),
+        margin=dict(l=left_margin, r=95, t=60, b=140),
         legend=dict(
             orientation="h",
             x=0.5,
@@ -288,24 +283,24 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
             font=dict(size=12),
             traceorder="normal"
         ),
+        clickmode="event+select",
         yaxis=dict(
             title="査定額(円)",
             tickformat=",.0f",
-            automargin=True,
-            title_standoff=18,
-            range=[a_min, a_max],
+            range=[amt_min, amt_max],
             zeroline=True,
-            zerolinewidth=1,
+            automargin=True,
+            title_standoff=18
         ),
         yaxis2=dict(
             title="査定率(%)",
             overlaying="y",
             side="right",
+            range=[rmin, rmax],
             tickformat=".2f",
+            zeroline=True,
             automargin=True,
-            title_standoff=18,
-            range=[r_min, r_max],
-            zeroline=False,
+            title_standoff=18
         ),
         xaxis=dict(
             title="",
@@ -315,15 +310,8 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        # ズーム連打での不安定化を防ぐ（他アプリはズームしない運用が多い）
-        dragmode=False,
-        clickmode="event+select",
     )
-    # x/y のズーム操作を無効化（tableの“ぴくつき”も減る）
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
     return fig
-
 def build_pie(period_filter: pd.DataFrame, title: str, group_col: str = "査定理由カテゴリ"):
     s = (
         period_filter.groupby(group_col, as_index=False)
@@ -520,68 +508,56 @@ def main():
         with t1:
             chart_df = msc2.sort_values("月").copy()
             fig = build_mix_fig(chart_df, title="査定額（棒）× 査定率（折れ線）")
-
-            base_key = f"mix_{segment_label}_{dept_mode}_{dept}_{period_mode}"
-            sel_state_key = f"{base_key}__sel_month"
-
-            # 選択解除（クリックの選択を保持して“ぴくつき”を減らす）
-            c_btn, c_msg = st.columns([1, 9])
-            with c_btn:
+            
+            # --- 安定版：Streamlit標準のPlotly描画（ズームで落ちない／一覧表が暴れない） ---
+            base_key = f"{segment_label}_{dept_mode}_{dept}_{period_mode}"
+            sel_state_key = f"sel_month_{base_key}"
+            
+            # （可能なら）クリック選択：on_select対応のStreamlitでは棒クリックで月を拾える
+            evt = None
+            try:
+                evt = st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    key=f"mix_{base_key}",
+                    on_select="rerun",
+                    selection_mode="points"
+                )
+            except TypeError:
+                # Streamlitが古い等で on_select 未対応の場合は通常描画にフォールバック
+                st.plotly_chart(fig, use_container_width=True, key=f"mix_{base_key}")
+            
+            cols_hint = st.columns([1, 7])
+            with cols_hint[0]:
                 if st.button("選択解除", key=f"clear_{base_key}"):
                     st.session_state.pop(sel_state_key, None)
-            with c_msg:
+            with cols_hint[1]:
                 st.caption("※棒グラフをクリックすると、その月の詳細（注意項目/診療科Top）が下に出ます。")
-
-            # ---- グラフ表示（Streamlitの選択イベントが使える場合はそれを使用）----
-            x_clicked = None
-            supports_select = False
-            try:
-                import inspect
-                params = inspect.signature(st.plotly_chart).parameters
-                supports_select = "on_select" in params
-            except Exception:
-                supports_select = False
-
-            if supports_select:
+            
+            # クリック選択が取れたら session_state に保存
+            x = None
+            if evt is not None:
                 try:
-                    import inspect
-                    params = inspect.signature(st.plotly_chart).parameters
-                    kwargs = dict(use_container_width=True, key=base_key, on_select="rerun")
-                    if "selection_mode" in params:
-                        kwargs["selection_mode"] = "points"
-                    evt = st.plotly_chart(fig, **kwargs)
-                    pts = None
-                    if hasattr(evt, "selection"):
-                        sel = evt.selection
-                        if isinstance(sel, dict):
-                            pts = sel.get("points")
-                        else:
-                            pts = getattr(sel, "points", None)
-                    elif isinstance(evt, dict):
-                        sel = evt.get("selection")
-                        if isinstance(sel, dict):
-                            pts = sel.get("points")
-                    if pts and len(pts) > 0:
-                        x_clicked = pts[0].get("x")
+                    pts = getattr(getattr(evt, "selection", None), "points", None)
+                    if pts:
+                        x = pts[0].get("x")
                 except Exception:
-                    st.plotly_chart(fig, use_container_width=True, key=base_key)
-            else:
-                # 選択イベントがない環境では「手動選択」に切り替える（ズーム/イベントで不安定になりやすいので）
-                st.plotly_chart(fig, use_container_width=True, key=base_key)
-                with st.expander("月を手動で選ぶ（クリックが効かない環境用）", expanded=False):
-                    month_opts = [fmt_month(p) for p in chart_df["月"].tolist()]
+                    x = None
+            if x:
+                st.session_state[sel_state_key] = str(x)
+            
+            # フォールバック：クリックが使えない環境向けに「月選択」を出す（ぴくつき防止のためexpander内）
+            if evt is None:
+                with st.expander("クリック選択が使えない環境向け：月を選択して詳細表示", expanded=False):
+                    opts = [fmt_month(p) for p in chart_df["月"].tolist()]
                     cur = st.session_state.get(sel_state_key)
-                    idx = 0
-                    if cur in month_opts:
-                        idx = month_opts.index(cur) + 1
-                    choice = st.selectbox("月", ["（未選択）"] + month_opts, index=idx, key=f"selbox_{base_key}")
-                    if choice != "（未選択）":
-                        x_clicked = choice
-
-            if x_clicked is not None and str(x_clicked) != "":
-                st.session_state[sel_state_key] = str(x_clicked)
-
-            # ---- 一覧（固定高さで“ぴくつき”を抑える）----
+                    if cur not in opts and opts:
+                        cur = opts[-1]
+                    if opts:
+                        idx = opts.index(cur) if cur in opts else 0
+                        sel = st.selectbox("月", opts, index=idx, key=f"selbox_{base_key}")
+                        st.session_state[sel_state_key] = str(sel)
+            
             show_tbl = chart_df.copy()
             show_tbl["年月"] = show_tbl["月"].apply(fmt_month)
             show_tbl = show_tbl.drop(columns=["月"])
@@ -591,21 +567,15 @@ def main():
             show_tbl["請求額"] = show_tbl["請求額"].round(0).astype(int)
             show_tbl["件数"] = show_tbl["件数"].round(0).astype(int)
             st.markdown("**推移データ（一覧）**")
-            st.dataframe(
-                show_tbl,
-                use_container_width=True,
-                hide_index=True,
-                height=min(520, 40 + 35*(len(show_tbl)+1)),
-                key=f"tbl_{base_key}"
-            )
-
-            # ---- 選択月の詳細（保持した選択で表示）----
+            st.dataframe(show_tbl, use_container_width=True, hide_index=True, key=f"tbl_{base_key}")
+            
+            # 選択月の詳細表示（クリック or 選択）
             sel_x = st.session_state.get(sel_state_key)
             if sel_x:
                 month_map = {fmt_month(p): p for p in chart_df["月"].tolist()}
                 sel_p = month_map.get(str(sel_x))
                 if sel_p is not None:
-                    st.markdown(f"**クリック月の詳細：{fmt_month(sel_p)}**")
+                    st.markdown(f"**選択月の詳細：{fmt_month(sel_p)}**")
                     ddm = ddf[ddf["月"]==sel_p]
                     if ddm.empty:
                         st.info("この月の詳細データがありません。")
@@ -614,12 +584,13 @@ def main():
                             査定額=("査定額","sum"), 件数=("件数","sum")
                         ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
                         st.markdown(f"注意項目 Top {s.breakdown_topn}")
-                        st.dataframe(top_items, use_container_width=True, hide_index=True, height=min(420, 40 + 35*(len(top_items)+1)))
+                        st.dataframe(top_items, use_container_width=True, hide_index=True, key=f"top_items_{base_key}")
+            
                         top_dept = ddm.groupby("診療科", as_index=False).agg(
                             査定額=("査定額","sum"), 件数=("件数","sum")
                         ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
                         st.markdown(f"診療科 Top {s.breakdown_topn}")
-                        st.dataframe(top_dept, use_container_width=True, hide_index=True, height=min(420, 40 + 35*(len(top_dept)+1)))
+                        st.dataframe(top_dept, use_container_width=True, hide_index=True, key=f"top_dept_{base_key}")
         with t2:
             c_pie1, c_pie2 = st.columns(2)
             with c_pie1:

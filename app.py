@@ -526,46 +526,59 @@ def main():
             except TypeError:
                 # Streamlitが古い等で on_select 未対応の場合は通常描画にフォールバック
                 st.plotly_chart(fig, use_container_width=True, key=f"mix_{base_key}")
-            
-            cols_hint = st.columns([1, 7])
-            with cols_hint[0]:
-                if st.button("選択解除", key=f"clear_{base_key}"):
-                    st.session_state.pop(sel_state_key, None)
-            with cols_hint[1]:
-                st.caption("※棒グラフをクリックすると、その月の詳細（注意項目/診療科Top）が下に出ます。")
-            
-            # クリック選択が取れたら session_state に保存
+
+            st.caption("※棒グラフをクリックすると、その月の詳細（注意項目/診療科Top）が下に出ます。もう一度同じ月をクリックすると解除されます。")
+
+            # クリック選択が取れたら session_state に保存（同じ月を再クリックで解除）
             x = None
+            curve = None
             if evt is not None:
                 try:
-                    pts = getattr(getattr(evt, "selection", None), "points", None)
+                    # Streamlitのplotly selectionは環境により dict / obj どちらもあり得る
+                    if isinstance(evt, dict):
+                        pts = evt.get("selection", {}).get("points", []) or []
+                    else:
+                        pts = getattr(getattr(evt, "selection", None), "points", None) or []
                     if pts:
-                        x = pts[0].get("x")
+                        pt0 = pts[0]
+                        if isinstance(pt0, dict):
+                            x = pt0.get("x")
+                            curve = pt0.get("curveNumber", pt0.get("curve_number"))
                 except Exception:
                     x = None
-            if x:
-                st.session_state[sel_state_key] = str(x)
-            
+                    curve = None
+
+            # 棒（trace 0）のクリックだけでトグル
+            if x and (curve is None or int(curve) == 0):
+                x = str(x)
+                cur_sel = st.session_state.get(sel_state_key)
+                if cur_sel == x:
+                    st.session_state.pop(sel_state_key, None)
+                else:
+                    st.session_state[sel_state_key] = x
+
             # フォールバック：クリックが使えない環境向けに「月選択」を出す（ぴくつき防止のためexpander内）
             if evt is None:
                 with st.expander("クリック選択が使えない環境向け：月を選択して詳細表示", expanded=False):
-                    opts = [fmt_month(p) for p in chart_df["月"].tolist()]
+                    opts = ["（詳細なし）"] + [fmt_month(p) for p in chart_df["月"].tolist()]
                     cur = st.session_state.get(sel_state_key)
-                    if cur not in opts and opts:
-                        cur = opts[-1]
-                    if opts:
-                        idx = opts.index(cur) if cur in opts else 0
-                        sel = st.selectbox("月", opts, index=idx, key=f"selbox_{base_key}")
+                    if cur not in opts:
+                        cur = "（詳細なし）"
+                    idx = opts.index(cur) if cur in opts else 0
+                    sel = st.selectbox("月", opts, index=idx, key=f"selbox_{base_key}")
+                    if sel == "（詳細なし）":
+                        st.session_state.pop(sel_state_key, None)
+                    else:
                         st.session_state[sel_state_key] = str(sel)
-            
+
             show_tbl = chart_df.copy()
             show_tbl["年月"] = show_tbl["月"].apply(fmt_month)
-            show_tbl = show_tbl.drop(columns=["月"])
-            show_tbl["査定率(%)"] = (show_tbl["査定率"]*100).round(2)
-            show_tbl = show_tbl.drop(columns=["査定率"])
+            show_tbl["査定率（％）"] = (show_tbl["査定率"] * 100).round(2)
             show_tbl["査定額"] = show_tbl["査定額"].round(0).astype(int)
             show_tbl["請求額"] = show_tbl["請求額"].round(0).astype(int)
             show_tbl["件数"] = show_tbl["件数"].round(0).astype(int)
+            show_tbl = show_tbl[["年月", "請求額", "査定額", "件数", "査定率（％）"]]
+
             st.markdown("**推移データ（一覧）**")
             st.dataframe(show_tbl, use_container_width=True, hide_index=True, key=f"tbl_{base_key}")
             

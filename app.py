@@ -198,43 +198,90 @@ def monthly_scope(msc: pd.DataFrame, dept_mode: str):
 
 def build_mix_fig(chart_df: pd.DataFrame, title: str):
     x = [fmt_month(p) for p in chart_df["月"]]
-    y_amt = chart_df["査定額"].tolist()
-    y_rate = (chart_df["査定率"] * 100).tolist()
-
-    # ---- 見切れ対策（特に入院DPC/出来高は金額が大きくなりがち）
-    max_amt = float(max(y_amt)) if len(y_amt) else 0.0
-    max_rate = float(max(y_rate)) if len(y_rate) else 0.0
-
-    # 左の金額軸の桁数に応じて左余白を少し広げる（plotlyのautomarginも併用）
-    amt_label = f"{int(max_amt):,}" if max_amt >= 0 else f"{int(abs(max_amt)):,}"
-    left_margin = int(min(max(90, 40 + len(amt_label) * 7), 220))
-
-    # 軸の「0」の位置ズレ（棒=金額、折れ線=率）を防ぐため、両軸とも0を含むレンジに固定
-    amt_max = max_amt * 1.10 if max_amt > 0 else 1.0
-    rate_max = max(max_rate * 1.15, 1.0) if max_rate > 0 else 1.0
+    y_amt = chart_df["査定額"].astype(float).tolist()
+    y_rate = (chart_df["査定率"].astype(float) * 100).tolist()
 
     fig = go.Figure()
     fig.add_bar(
-        x=x,
-        y=y_amt,
-        name="査定額",
-        hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>",
+        x=x, y=y_amt, name="査定額",
+        hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>"
     )
     fig.add_scatter(
-        x=x,
-        y=y_rate,
-        mode="lines+markers",
-        name="査定率(%)",
+        x=x, y=y_rate, mode="lines+markers", name="査定率(%)",
         yaxis="y2",
-        hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>",
+        hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>"
     )
 
-    # ここで「凡例・軸ラベルの重なり」＋「軸の見切れ」＋「0位置ズレ」をまとめて解消
+    # --- 軸レンジを賢く決める（外来/入院DPC/出来高のどれでも崩れないように）
+    # ポイント：
+    # 1) 金額・率とも「データが負のみ/正のみ/混在」を判定して、見切れないレンジにする
+    # 2) 二軸の「0」の位置がズレないように、右軸レンジを左軸の0位置に合わせて決める
+    def _axis_range(vals, pad=0.12):
+        if len(vals) == 0:
+            return -1.0, 1.0
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        if np.isclose(vmin, vmax):
+            if np.isclose(vmin, 0.0):
+                return -1.0, 1.0
+            span = max(abs(vmin) * 0.2, 1.0)
+            return vmin - span, vmax + span
+        if vmin >= 0:
+            return 0.0, vmax * (1.0 + pad)
+        if vmax <= 0:
+            return vmin * (1.0 + pad), 0.0
+        return vmin * (1.0 + pad), vmax * (1.0 + pad)
+
+    y1_min, y1_max = _axis_range(y_amt, pad=0.12)
+    # 0の相対位置（0がどの高さに来るか）
+    span1 = (y1_max - y1_min) if (y1_max - y1_min) != 0 else 1.0
+    r = (0.0 - y1_min) / span1
+    r = float(np.clip(r, 0.0, 1.0))
+
+    # 右軸：左軸と同じ0位置になるようにレンジ決定（データが収まる最小レンジを採用）
+    if len(y_rate) == 0:
+        y2_min, y2_max = -1.0, 1.0
+    else:
+        vmin2 = float(np.nanmin(y_rate))
+        vmax2 = float(np.nanmax(y_rate))
+        # ほぼ一定の場合の保険
+        if np.isclose(vmin2, vmax2):
+            if np.isclose(vmin2, 0.0):
+                vmin2, vmax2 = -1.0, 1.0
+            else:
+                span2 = max(abs(vmin2) * 0.2, 1.0)
+                vmin2, vmax2 = vmin2 - span2, vmax2 + span2
+
+        upper = max(vmax2, 0.0)
+        lower = min(vmin2, 0.0)
+        eps = 1e-6
+
+        if r <= 0.02 + eps:
+            # 左軸が「0始まり」の見え方（正のみ） → 右軸も0始まり
+            y2_min = 0.0
+            y2_max = max(upper * 1.15, 1.0)
+        elif r >= 0.98 - eps:
+            # 左軸が「0終わり」の見え方（負のみ） → 右軸も0終わり
+            y2_max = 0.0
+            y2_min = min(lower * 1.15, -1.0)
+        else:
+            # 左軸の0位置(r)に合わせて、[ -r*span, (1-r)*span ] を構成
+            need1 = upper / (1.0 - r) if (1.0 - r) > eps else 0.0
+            need2 = (-lower) / r if r > eps else 0.0
+            span2 = max(need1, need2, 1.0) * 1.10  # 少し余白
+            y2_min = -r * span2
+            y2_max = (1.0 - r) * span2
+
+    # 左余白：桁が大きいときにラベルが切れないように（外来/入院で差が出る）
+    max_abs_amt = max([abs(v) for v in y_amt], default=0.0)
+    amt_label = f"{int(max_abs_amt):,}"
+    left_margin = int(min(max(100, 40 + len(amt_label) * 7), 240))
+
     fig.update_layout(
         template="plotly_dark",
         title=title,
         height=470,
-        margin=dict(l=left_margin, r=90, t=60, b=140),
+        margin=dict(l=left_margin, r=95, t=60, b=140),
         legend=dict(
             orientation="h",
             x=0.5,
@@ -242,15 +289,16 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
             y=-0.28,
             yanchor="top",
             font=dict(size=12),
-            traceorder="normal",
+            traceorder="normal"
         ),
         yaxis=dict(
             title="査定額(円)",
             tickformat=",.0f",
             automargin=True,
             title_standoff=18,
-            rangemode="tozero",
-            range=[0, amt_max],
+            range=[y1_min, y1_max],
+            zeroline=True,
+            zerolinewidth=1
         ),
         yaxis2=dict(
             title="査定率(%)",
@@ -259,14 +307,15 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
             tickformat=".2f",
             automargin=True,
             title_standoff=18,
-            rangemode="tozero",
-            range=[0, rate_max],
+            range=[y2_min, y2_max],
+            zeroline=True,
+            zerolinewidth=1
         ),
         xaxis=dict(
             title="",
             tickangle=-35,
             automargin=True,
-            tickfont=dict(size=11),
+            tickfont=dict(size=11)
         ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",

@@ -199,28 +199,42 @@ def monthly_scope(msc: pd.DataFrame, dept_mode: str):
 def build_mix_fig(chart_df: pd.DataFrame, title: str):
     x = [fmt_month(p) for p in chart_df["月"]]
     y_amt = chart_df["査定額"].tolist()
-    y_rate = (chart_df["査定率"]*100).tolist()
+    y_rate = (chart_df["査定率"] * 100).tolist()
+
+    # ---- 見切れ対策（特に入院DPC/出来高は金額が大きくなりがち）
+    max_amt = float(max(y_amt)) if len(y_amt) else 0.0
+    max_rate = float(max(y_rate)) if len(y_rate) else 0.0
+
+    # 左の金額軸の桁数に応じて左余白を少し広げる（plotlyのautomarginも併用）
+    amt_label = f"{int(max_amt):,}" if max_amt >= 0 else f"{int(abs(max_amt)):,}"
+    left_margin = int(min(max(90, 40 + len(amt_label) * 7), 220))
+
+    # 軸の「0」の位置ズレ（棒=金額、折れ線=率）を防ぐため、両軸とも0を含むレンジに固定
+    amt_max = max_amt * 1.10 if max_amt > 0 else 1.0
+    rate_max = max(max_rate * 1.15, 1.0) if max_rate > 0 else 1.0
 
     fig = go.Figure()
     fig.add_bar(
-        x=x, y=y_amt, name="査定額",
-        hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>"
+        x=x,
+        y=y_amt,
+        name="査定額",
+        hovertemplate="%{x}<br>査定額：%{y:,.0f}円<extra></extra>",
     )
     fig.add_scatter(
-        x=x, y=y_rate, mode="lines+markers", name="査定率(%)",
+        x=x,
+        y=y_rate,
+        mode="lines+markers",
+        name="査定率(%)",
         yaxis="y2",
-        hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>"
+        hovertemplate="%{x}<br>査定率：%{y:.2f}%<extra></extra>",
     )
 
-    # ここで「凡例・軸ラベルの重なり」を解消
-    # - 凡例はプロット外（下）へ
-    # - 左右の余白を少し増やし、automarginも有効化
-    # - 下余白も増やして、凡例＋x軸ラベルがぶつからないようにする
+    # ここで「凡例・軸ラベルの重なり」＋「軸の見切れ」＋「0位置ズレ」をまとめて解消
     fig.update_layout(
         template="plotly_dark",
         title=title,
         height=470,
-        margin=dict(l=100, r=90, t=60, b=140),
+        margin=dict(l=left_margin, r=90, t=60, b=140),
         legend=dict(
             orientation="h",
             x=0.5,
@@ -228,13 +242,15 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
             y=-0.28,
             yanchor="top",
             font=dict(size=12),
-            traceorder="normal"
+            traceorder="normal",
         ),
         yaxis=dict(
             title="査定額(円)",
             tickformat=",.0f",
             automargin=True,
-            title_standoff=18
+            title_standoff=18,
+            rangemode="tozero",
+            range=[0, amt_max],
         ),
         yaxis2=dict(
             title="査定率(%)",
@@ -242,18 +258,21 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
             side="right",
             tickformat=".2f",
             automargin=True,
-            title_standoff=18
+            title_standoff=18,
+            rangemode="tozero",
+            range=[0, rate_max],
         ),
         xaxis=dict(
             title="",
             tickangle=-35,
             automargin=True,
-            tickfont=dict(size=11)
+            tickfont=dict(size=11),
         ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
 
 def build_pie(period_filter: pd.DataFrame, title: str, group_col: str = "査定理由カテゴリ"):
     s = (

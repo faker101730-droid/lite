@@ -373,6 +373,7 @@ def main():
         st.session_state["settings"] = Settings()
 
     with st.sidebar:
+        st.caption("Developed by Ryunosuke Matsuzaki")
         st.subheader("データ")
         up = st.file_uploader("Excelを選択（まだ反映しません）", type=["xlsx"])
         if up is not None:

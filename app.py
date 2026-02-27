@@ -6,8 +6,6 @@ import pandas as pd
 import streamlit as st
 
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
-
 APP_TITLE = "DPC査定分析 v3.4"
 REQUIRED_COLS = ["月","区分","入院種別","診療科","査定理由カテゴリ","注意項目","査定額","件数","請求額"]
 
@@ -197,79 +195,58 @@ def monthly_scope(msc: pd.DataFrame, dept_mode: str):
     return g.sort_values("月")
 
 def build_mix_fig(chart_df: pd.DataFrame, title: str):
-    """査定額（棒）×査定率（折れ線）の混合グラフ。
-    - 左右二軸の「0」の高さを一致させる（棒と折れ線の0ズレ対策）
-    - 軸レンジを明示して自動ズームを抑制（zoom連打での不安定化対策）
+    """混合グラフ（査定額×査定率）
+    - 左右二軸の「0の高さ」を一致させる（ズレ防止）
+    - 入院（マイナス査定が出る月）でも崩れない
     """
+
+    # X
     x = [fmt_month(p) for p in chart_df["月"]]
-    y_amt = pd.to_numeric(chart_df["査定額"], errors="coerce").fillna(0).astype(float).tolist()
-    y_rate = (pd.to_numeric(chart_df["査定率"], errors="coerce").fillna(0).astype(float) * 100).tolist()
 
-    def _range_with_zero(vals: list[float], pad: float = 0.10) -> tuple[float, float]:
-        if not vals:
+    # Y（amount / rate%）
+    y_amt = pd.to_numeric(chart_df["査定額"], errors="coerce").fillna(0.0).astype(float).tolist()
+    y_rate = (pd.to_numeric(chart_df["査定率"], errors="coerce").fillna(0.0).astype(float) * 100.0).tolist()
+
+    def _nice_range(vals, pad=0.06, include_zero=True):
+        v = [float(a) for a in vals if a is not None and np.isfinite(a)]
+        if not v:
             return (-1.0, 1.0)
-        vmin = float(np.nanmin(vals))
-        vmax = float(np.nanmax(vals))
-        if not np.isfinite(vmin) or not np.isfinite(vmax):
-            return (-1.0, 1.0)
+        vmin, vmax = min(v), max(v)
+        if include_zero:
+            vmin = min(vmin, 0.0)
+            vmax = max(vmax, 0.0)
         if vmin == vmax:
-            if vmin == 0:
-                return (-1.0, 1.0)
-            # 少し幅を持たせる
-            span = abs(vmin) * (1.0 + pad)
-            return (min(0.0, vmin - span * 0.10), max(0.0, vmax + span * 0.10))
+            span = abs(vmin) if vmin != 0 else 1.0
+            vmin -= span * 0.2
+            vmax += span * 0.2
+        span = vmax - vmin
+        vmin -= span * pad
+        vmax += span * pad
+        if include_zero:
+            vmin = min(vmin, 0.0)
+            vmax = max(vmax, 0.0)
+        return (vmin, vmax)
 
-        # 0を含むレンジへ
-        if vmin >= 0:
-            lo = 0.0
-            hi = vmax * (1.0 + pad)
-            if hi == 0:
-                hi = 1.0
-            return (lo, hi)
-        if vmax <= 0:
-            hi = 0.0
-            lo = vmin * (1.0 + pad)  # より負側へ
-            if lo == 0:
-                lo = -1.0
-            return (lo, hi)
+    # まずは素直なレンジ（両方0を含む）
+    Lmin, Lmax = _nice_range(y_amt, pad=0.06, include_zero=True)
+    Rmin0, Rmax0 = _nice_range(y_rate, pad=0.10, include_zero=True)
 
-        # 正負混在
-        lo = vmin * (1.0 + pad)
-        hi = vmax * (1.0 + pad)
-        # 念のため0を包含
-        lo = min(lo, 0.0)
-        hi = max(hi, 0.0)
-        return (lo, hi)
+    spanL = (Lmax - Lmin) if (Lmax - Lmin) != 0 else 1.0
+    t = (0.0 - Lmin) / spanL  # 左軸での0位置（0〜1）
 
-    amt_lo, amt_hi = _range_with_zero(y_amt, pad=0.08)
-
-    # 左軸レンジ内での0位置（下=0, 上=1）
-    denom = (amt_hi - amt_lo) if (amt_hi - amt_lo) != 0 else 1.0
-    f = (0.0 - amt_lo) / denom
-    # 極端値は抑える（無限大レンジ防止）
-    f = float(np.clip(f, 0.02, 0.98))
-
-    # 右軸（率）の上限はデータ最大＋余白
-    rate_max = float(np.nanmax(y_rate)) if len(y_rate) else 0.0
-    rate_min = float(np.nanmin(y_rate)) if len(y_rate) else 0.0
-    if not np.isfinite(rate_max):
-        rate_max = 0.0
-    if not np.isfinite(rate_min):
-        rate_min = 0.0
-
-    rate_hi = max(1.0, rate_max * 1.10)  # 0だけのときも最低レンジ確保
-
-    # 0位置をfに合わせて右軸下限を決める（0ズレ修正のコア）
-    # (0 - lo2)/(hi2 - lo2) = f  => lo2 = -(f/(1-f))*hi2
-    rate_lo = - (f / (1.0 - f)) * rate_hi
-
-    # データの最小が0より大きい場合でも、表示に支障ないように少し余裕
-    rate_lo = min(rate_lo, rate_min - abs(rate_hi) * 0.02)
-
-    # 余白（左軸ラベルの桁数で自動調整）
-    max_abs_amt = max(abs(amt_lo), abs(amt_hi), 1.0)
-    digits = len(f"{int(max_abs_amt):,}")
-    left_margin = 90 + max(0, digits - 6) * 7  # 桁が増えるほど少しだけ左余白を増やす
+    eps = 1e-9
+    if t <= eps:
+        # 左軸で0が下端 -> 右軸も下端を0に
+        Rmin, Rmax = 0.0, max(Rmax0, 1.0)
+    elif t >= 1.0 - eps:
+        # 左軸で0が上端 -> 右軸も上端を0に
+        Rmin, Rmax = min(Rmin0, -1.0), 0.0
+    else:
+        # (0 - Rmin)/(Rmax - Rmin) = t となるよう、スケールSで決める
+        need1 = (Rmax0 / (1.0 - t)) if (1.0 - t) > eps else abs(Rmax0) * 10
+        need2 = (-Rmin0 / t) if t > eps else abs(Rmin0) * 10
+        S = max(need1, need2, 1.0)
+        Rmin, Rmax = -t * S, (1.0 - t) * S
 
     fig = go.Figure()
     fig.add_bar(
@@ -286,7 +263,7 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         template="plotly_dark",
         title=title,
         height=470,
-        margin=dict(l=left_margin, r=90, t=60, b=140),
+        margin=dict(l=110, r=95, t=60, b=140),
         legend=dict(
             orientation="h",
             x=0.5,
@@ -299,34 +276,34 @@ def build_mix_fig(chart_df: pd.DataFrame, title: str):
         yaxis=dict(
             title="査定額(円)",
             tickformat=",.0f",
-            range=[amt_lo, amt_hi],
             automargin=True,
             title_standoff=18,
-            fixedrange=True,  # ズーム/パン無効（plotly_eventsの不安定化対策）
-            zeroline=True
+            range=[Lmin, Lmax],
+            zeroline=True,
+            zerolinewidth=1,
         ),
         yaxis2=dict(
             title="査定率(%)",
             overlaying="y",
             side="right",
             tickformat=".2f",
-            range=[rate_lo, rate_hi],
             automargin=True,
             title_standoff=18,
-            fixedrange=True,
-            zeroline=False
+            range=[Rmin, Rmax],
+            zeroline=False,
         ),
         xaxis=dict(
             title="",
             tickangle=-35,
             automargin=True,
-            tickfont=dict(size=11),
-            fixedrange=True
+            tickfont=dict(size=11)
         ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+        uirevision="mix_keep"
     )
     return fig
+
 
 def build_pie(period_filter: pd.DataFrame, title: str, group_col: str = "査定理由カテゴリ"):
     s = (
@@ -524,15 +501,8 @@ def main():
         with t1:
             chart_df = msc2.sort_values("月").copy()
             fig = build_mix_fig(chart_df, title="査定額（棒）× 査定率（折れ線）")
-            clicked = plotly_events(
-                fig,
-                click_event=True,
-                hover_event=False,
-                select_event=False,
-                override_height=430,
-                key=f"mix_{segment_label}_{dept_mode}_{dept}_{period_mode}"
-            )
-            st.caption("※棒グラフをクリックすると、その月の詳細（注意項目/診療科Top）が下に出ます。")
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
+            st.caption("※グラフの拡大縮小は右上の操作から可能です。下の「月選択」で詳細を表示します。")
 
             show_tbl = chart_df.copy()
             show_tbl["年月"] = show_tbl["月"].apply(fmt_month)
@@ -545,27 +515,35 @@ def main():
             st.markdown("**推移データ（一覧）**")
             st.dataframe(show_tbl, use_container_width=True, hide_index=True)
 
-            if clicked:
-                x = clicked[0].get("x")
-                if x:
-                    month_map = {fmt_month(p): p for p in chart_df["月"].tolist()}
-                    sel_p = month_map.get(str(x))
-                    if sel_p is not None:
-                        st.markdown(f"**クリック月の詳細：{fmt_month(sel_p)}**")
-                        ddm = ddf[ddf["月"]==sel_p]
-                        if ddm.empty:
-                            st.info("この月の詳細データがありません。")
-                        else:
-                            top_items = ddm.groupby(["査定理由カテゴリ","注意項目"], as_index=False).agg(
-                                査定額=("査定額","sum"), 件数=("件数","sum")
-                            ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
-                            st.markdown(f"注意項目 Top {s.breakdown_topn}")
-                            st.dataframe(top_items, use_container_width=True, hide_index=True)
-                            top_dept = ddm.groupby("診療科", as_index=False).agg(
-                                査定額=("査定額","sum"), 件数=("件数","sum")
-                            ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
-                            st.markdown(f"診療科 Top {s.breakdown_topn}")
-                            st.dataframe(top_dept, use_container_width=True, hide_index=True)
+            # 詳細表示（月選択）
+            month_map = {fmt_month(p): p for p in chart_df["月"].tolist()}
+            opts = ["（未選択）"] + list(month_map.keys())
+            sel_label = st.selectbox(
+                "詳細を表示する月",
+                options=opts,
+                index=0,
+                key=f"mix_sel_{segment_label}_{dept_mode}_{dept}_{period_mode}"
+            )
+            
+            if sel_label != "（未選択）":
+                sel_p = month_map.get(sel_label)
+                if sel_p is not None:
+                    st.markdown(f"**選択月の詳細：{fmt_month(sel_p)}**")
+                    ddm = ddf[ddf["月"]==sel_p]
+                    if ddm.empty:
+                        st.info("この月の詳細データがありません。")
+                    else:
+                        top_items = ddm.groupby(["査定理由カテゴリ","注意項目"], as_index=False).agg(
+                            査定額=("査定額","sum"), 件数=("件数","sum")
+                        ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
+                        st.markdown(f"注意項目 Top {s.breakdown_topn}")
+                        st.dataframe(top_items, use_container_width=True, hide_index=True)
+                        top_dept = ddm.groupby("診療科", as_index=False).agg(
+                            査定額=("査定額","sum"), 件数=("件数","sum")
+                        ).sort_values("査定額", ascending=False).head(s.breakdown_topn)
+                        st.markdown(f"診療科 Top {s.breakdown_topn}")
+                        st.dataframe(top_dept, use_container_width=True, hide_index=True)
+            
 
         with t2:
             c_pie1, c_pie2 = st.columns(2)
